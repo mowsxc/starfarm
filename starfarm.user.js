@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StarFarm V2 - Gacha Automation
 // @namespace    https://ultrarouter.org/gacha/
-// @version      2.1.0
+// @version      0.0.1
 // @description  All-in-one gacha assistant: dungeon farming, leveling, star-up, shard decomposition, gacha, gem socketing, shopping, squad optimizer. Server-authoritative settlement.
 // @author       StarFarm
 // @updateURL     https://raw.githubusercontent.com/mowsxc/starfarm/main/starfarm.user.js
