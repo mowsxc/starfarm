@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StarFarm - Gacha Automation
 // @namespace    https://ultrarouter.org/gacha/
-// @version      0.0.1
+// @version      0.0.2
 // @description  E-focused gacha assistant: auto dungeon, leveling, star-up, shard decomposition, gacha, gem socketing, squad optimizer, auto-flow. Server-authoritative settlement.
 // @author       StarFarm
 // @updateURL     https://raw.githubusercontent.com/mowsxc/starfarm/main/starfarm.user.js
@@ -27,7 +27,7 @@
     bgMode: true,            // true=后台静默(不进战斗画面)  false=完整动画
     farmWhenNoToken: true,   // 今日代币池为0时仍继续刷
     gapMs: 500,              // 每场之间的间隔
-    autoMulti: true,         // 自动维持双倍卡开启（E产出翻倍，核心！）
+    // 双倍卡为时长道具：脚本不自动续卡，避免每场浪费。要开就手动点一次。
     autoFlow: false,         // 自动流：副本→升级→升星→召唤→分解 闭环
     // 召唤
     gachaCount: 10,          // 每次召唤张数(1或10)
@@ -427,7 +427,7 @@
             <div><span>累计场次</span><b>${S.runCount}</b></div>
             <div><span>今日副本</span><b>${todayRuns()}</b></div>
           </div>
-          <div class="sf-stat"><span>双倍卡 <b class="sf-gold">${(typeof SAVE !== "undefined" && SAVE) ? SAVE.multi : 0}张</b> ${(typeof SAVE !== "undefined" && SAVE && SAVE.multiOn) ? '<span class="sf-on">生效中</span>' : '<span class="sf-off">未开</span>'}</span><span>${CFG.autoMulti ? "自动维持:开" : "自动维持:关"}</span></div>
+          <div class="sf-stat"><span>双倍卡 <b class="sf-gold">${(typeof SAVE !== "undefined" && SAVE) ? SAVE.multi : 0}张</b> ${(typeof SAVE !== "undefined" && SAVE && SAVE.multiOn) ? '<span class="sf-on">生效中</span>' : '<span class="sf-off">未开</span>'}</span><span>时长道具·手动开</span></div>
         </div>
 
         <div class="sf-card">
@@ -448,7 +448,7 @@
           <div class="sf-grid">
             ${btn("sf-farm", S.T.farm.run ? "停止副本" : "自动副本", S.T.farm.run)}
             ${btn("sf-fg", CFG.bgMode ? "后台:开" : "后台:关", CFG.bgMode)}
-            ${btn("sf-multi", CFG.autoMulti ? "双倍:开" : "双倍:关", CFG.autoMulti)}
+            ${btn("sf-multi", (typeof SAVE !== "undefined" && SAVE && SAVE.multiOn) ? "双倍:生效" : "开双倍")}
             ${btn("sf-token", CFG.farmWhenNoToken ? "池零续刷:开" : "池零续刷:关", CFG.farmWhenNoToken)}
           </div>
           <div class="sf-grid" style="margin-top:5px">
@@ -503,7 +503,7 @@
     on("sf-decomp", "onclick", () => toggleTask("decomp", decompTask));
     on("sf-gem", "onclick", () => toggleTask("gem", gemTask));
     on("sf-opt", "onclick", () => optimizeSquad());
-    on("sf-multi", "onclick", () => { CFG.autoMulti = !CFG.autoMulti; log(`自动双倍卡 ${CFG.autoMulti ? "开启：刷本前自动开双倍" : "关闭"}`); if (CFG.autoMulti) ensureMulti(); });
+    on("sf-multi", "onclick", () => manualMulti());
     on("sf-gacha", "onclick", () => toggleTask("gacha", gachaTask));
     on("sf-flow", "onclick", () => toggleTask("flow", flowTask));
 
@@ -602,7 +602,7 @@
   async function farmTask() {
     hookFinishRun();
     if (CFG.bgMode && typeof nav === "function" && document.body.dataset.page === "page-battle") nav("page-stage");
-    log(`刷E启动：${stageName(latestStage())} · 目标 ${CFG.rounds === Infinity ? "∞" : CFG.rounds} 场 · 自动双倍 ${CFG.autoMulti ? "开" : "关"}`, "ok");
+    log(`刷E启动：${stageName(latestStage())} · 目标 ${CFG.rounds === Infinity ? "∞" : CFG.rounds} 场`, "ok");
     S.goldStart = gold(); S.stamStart = stamina().cur; S.siteStart = siteE();
     S.eStart = todayE();
     while (S.T.farm.run && !S.T.farm.abort) {
@@ -611,8 +611,6 @@
       if (st.cur < CFG.minStamina) { log(`体力 ${st.cur}/${st.max} 低于 ${CFG.minStamina}，暂停`, "warn"); S.T.farm.run = false; render(); break; }
       if (!CFG.farmWhenNoToken && budgetLeft() <= 0) { log("今日池为0且池零续刷关闭，暂停", "warn"); S.T.farm.run = false; render(); break; }
       if (typeof battleRunning !== "undefined" && battleRunning) { await sleep(400); continue; }
-      // 每场前维持双倍卡开启（E 产出翻倍，攒 E 核心）
-      if (CFG.autoMulti) await ensureMulti();
       const ok = CFG.bgMode ? await fastRun() : await animRun();
       if (!ok) { log("本场失败，场次不计数；2秒后重试", "warn"); await sleep(2000); continue; }
       S.done++;   // 只在结算成功后计场次
@@ -670,7 +668,6 @@
       // 1) 刷一场副本（产 E + 金币）
       const st = stamina();
       if (st.cur < CFG.minStamina) { log(`体力 ${st.cur}/${st.max} 不足，自动流暂停`, "warn"); break; }
-      if (CFG.autoMulti) await ensureMulti();
       const ok = CFG.bgMode ? await fastRun() : await animRun();
       S.T.farm.run = false;
       if (!ok) { log("自动流：本场副本失败，2秒后重试", "warn"); await sleep(2000); continue; }
@@ -891,14 +888,13 @@
   }
 
   // 攒E核心：有双倍卡且未开启时自动开启，让副本 E 产出翻倍。
-  async function ensureMulti() {
-    try {
-      if (typeof SAVE === "undefined" || !SAVE) return;
-      if (SAVE.multi <= 0) return;              // 没有双倍卡
-      if (SAVE.multiOn) return;                 // 已开启
-      const res = await safeMutate("multi", { enabled: true });
-      if (res) log(`自动开启双倍卡（余 ${SAVE.multi} 张）· E 产出翻倍`, "ok");
-    } catch (e) {}
+  // 手动开一次双倍卡（时长道具，只在你点击时开，脚本刷本过程绝不自动续）
+  async function manualMulti() {
+    if (typeof SAVE === "undefined" || !SAVE) return;
+    if (SAVE.multiOn) { log("双倍卡已在生效中", "warn"); return; }
+    if (SAVE.multi <= 0) { log("没有双倍卡了", "warn"); return; }
+    const res = await safeMutate("multi", { enabled: true });
+    log(res ? `已手动开启双倍卡（余 ${SAVE.multi} 张）` : `开双倍失败：${Store.lastError || "未知"}`, res ? "ok" : "bad");
   }
 
   /* ============================================================
@@ -952,7 +948,7 @@
       ready: S.ready, tasks: JSON.parse(JSON.stringify(S.T)),
       gold: gold(), stamina: stamina(), siteE: siteE(), todayE: todayE(), todayRuns: todayRuns(),
       eGot: S.eGot, eGotTotal: S.eGotTotal, runCount: S.runCount,
-      autoMulti: CFG.autoMulti, multiOn: (typeof SAVE !== "undefined" && SAVE) ? SAVE.multiOn : null, multiCards: (typeof SAVE !== "undefined" && SAVE) ? SAVE.multi : null,
+      multiOn: (typeof SAVE !== "undefined" && SAVE) ? SAVE.multiOn : null, multiCards: (typeof SAVE !== "undefined" && SAVE) ? SAVE.multi : null,
       tokens: tokens(), budget: budgetLeft(), stage: stageName(latestStage()),
       teamPower: teamPower(), squad: (typeof SAVE !== "undefined" && SAVE) ? (SAVE.squad || []).slice() : [],
       done: S.done, wins: S.wins, fails: S.fails, stars3: S.stars3,
@@ -961,7 +957,7 @@
     }),
     analyze,
     optimize: optimizeSquad,
-    multi: () => { CFG.autoMulti = !CFG.autoMulti; log(`自动双倍卡 ${CFG.autoMulti ? "开启" : "关闭"}`); if (CFG.autoMulti) ensureMulti(); return CFG.autoMulti; },
+    multi: manualMulti,
   };
 
   /* ============================================================
