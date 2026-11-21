@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FarmFarm - Ultra Router Farm Automation
 // @namespace    https://ultrarouter.org/farm/
-// @version      0.0.1
+// @version      0.0.5
 // @description  Auto farm for ultrarouter.org/farm: harvest, plant best crop, water/fertilize, steal from neighbors. Server-authoritative.
 // @author       FarmFarm
 // @match        https://ultrarouter.org/farm
@@ -206,7 +206,7 @@
     const badge = !S.ready ? '<span class="ff-badge">等待游戏</span>' : S.run ? '<span class="ff-badge run">运行中</span>' : '<span class="ff-badge">待机</span>';
     const best = pickBestCrop();
     p.innerHTML = `
-      <div class="ff-head"><div class="ff-title">🌾 FarmFarm<small>0.0.1</small></div>${badge}</div>
+      <div class="ff-head"><div class="ff-title">🌾 FarmFarm<small>0.0.5</small></div>${badge}</div>
       <div class="ff-body">
         <div class="ff-cardbox">
           <div class="ff-ct">E 收益看板</div>
