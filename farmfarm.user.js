@@ -28,7 +28,9 @@
     autoWater: true,     // 自动浇水（每次 -1分钟生长）
     autoFert: true,      // 自动施肥（每次 -1分钟，每天20次）
     autoSteal: true,     // 自动偷邻居（每天10次）
-    minStealPrice: 60,   // 偷菜最低单价阈值：低于此单价不偷（60=跳过白萝卜/茄子/南瓜等低价值）
+    minStealPrice: 60,   // 偷菜最低单价阈值（兜底）
+    stealTopOnly: true,  // 只偷最高一档作物（荔枝172/杨梅168/樱桃156），其余留次数等刷出更好的
+    stealRefreshMs: 8000,// 没高价值作物时，多久重刷一次邻居列表
     // 节奏
     tickMs: 3000,        // 主循环间隔
     stealInterval: 60000,// 偷菜扫描间隔
@@ -44,6 +46,7 @@
     harvestE: 0, stealE: 0, harvestCount: 0, stealCount: 0, plantCount: 0,
     results: [], logs: [], errors: [], last: "",
     lastStealAt: 0, lastSyncAt: 0,
+    lastStealScan: 0,
     cropName: {},
   };
   window.__FF = S;
@@ -320,11 +323,6 @@
       const d = await doAct("/fert-all", {}, "施肥");
       if (d) log(`一键施肥 · 剩余 ${(S.daily.fert_left || 0) - 1} 次`, "ok");
     }
-    // 5) 偷邻居
-    if (CFG.autoSteal && Date.now() - S.lastStealAt > CFG.stealInterval) {
-      S.lastStealAt = Date.now();
-      await stealPass();
-    }
     syncState();
     render();
   }
@@ -343,9 +341,18 @@
         targets.push({ uid: nb.user_id, idx: p.idx, cropId: p.crop_id, count: p.count || 1, value: c ? stealValue(c) : 0 });
       }
       targets.sort((a, b) => b.value - a.value);
-      // 用游戏中暴露的 CROP_BY_ID 取名字
-      const w = gw();
-      for (const t of targets) {
+      if (!targets.length) {
+        S.lastStealScan = Date.now();
+        return;
+      }
+      // 只偷最高一档：取最高单价，只偷与最高同档的（荔枝172/杨梅168/樱桃156 属同档附近）
+      let pool = targets;
+      if (CFG.stealTopOnly) {
+        const top = targets[0].value;
+        pool = targets.filter(t => t.value >= top * 0.85); // 只偷收益≥最高档85%的
+      }
+      let stole = 0;
+      for (const t of pool) {
         if ((S.daily.steal_left || 0) <= 0) break;
         const r = await doAct("/steal", { user_id: t.uid, idx: t.idx }, "偷菜");
         if (r) {
@@ -354,11 +361,13 @@
           const m = String(r.message || "").match(/\+E?([\d.]+)\s*额度/i) || String(r.message || "").match(/\+([\d.]+)\s*E/i);
           if (m && !e) e = parseFloat(m[1]) || 0;
           S.stealE += e; S.stealCount++;
+          stole++;
           pushResult("steal", e, cropName(t.cropId), t.count, r.message || "");
           log(`偷 ${cropName(t.cropId)} ×${t.count} · +${e.toFixed(3)} E（剩 ${S.daily.steal_left || 0}次）`, "ok");
           await sleep(250);
         }
       }
+      if (!stole) S.lastStealScan = Date.now();  // 有目标但没偷成（可能已被别人偷），稍后重刷
     } catch (e) { log("偷菜扫描失败：" + e.message, "warn"); }
   }
 
@@ -368,8 +377,7 @@
       S.cycle++;
       const before = S.daily.harvest_quota || 0;
       try { await oneCycle(); } catch (e) { log("循环异常：" + e.message, "bad"); }
-      // 智能节奏：有收获/偷取/播种发生就快速跟进；否则拉长间隔，避免空转刷日志。
-      const active = (S.daily.harvest_quota || 0) > before || S.stealCount > 0 && Date.now() - S.lastStealAt < 5000;
+      // 田地节奏：有作物在生长就 30 秒巡检；否则按 tickMs 快速跟进
       const waiting = S.plots.some(p => p.cropId && !p.ready && !p.withered);
       await sleep(waiting ? 30000 : CFG.tickMs);
     }
@@ -377,7 +385,23 @@
   }
   function toggle() {
     if (S.run) { S.abort = true; S.run = false; log("停止中", "warn"); render(); }
-    else { S.run = true; S.abort = false; render(); loop(); }
+    else { S.run = true; S.abort = false; render(); loop(); stealLoop(); }
+  }
+
+  // 偷菜独立循环：每 8 秒刷一次邻居，只偷最高价值作物，直到次数用完。
+  async function stealLoop() {
+    log(`偷菜循环启动：只偷单价≥${CFG.minStealPrice}且收益≥最高档85%的作物`, "ok");
+    let guard = 0;
+    while (S.run && !S.abort) {
+      guard++;
+      if (CFG.autoSteal && (S.daily.steal_left || 0) > 0 && ready()) {
+        try {
+          syncState();
+          await stealPass();
+        } catch (e) {}
+      }
+      await sleep(CFG.stealRefreshMs);
+    }
   }
 
   /* ============================================================
