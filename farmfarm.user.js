@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FarmFarm - Ultra Router Farm Automation
 // @namespace    https://ultrarouter.org/farm/
-// @version      0.0.2
+// @version      0.0.1
 // @description  Auto farm for ultrarouter.org/farm: harvest, plant best crop, water/fertilize, steal from neighbors. Server-authoritative.
 // @author       FarmFarm
 // @match        https://ultrarouter.org/farm
@@ -28,6 +28,7 @@
     autoWater: true,     // 自动浇水（每次 -1分钟生长）
     autoFert: true,      // 自动施肥（每次 -1分钟，每天20次）
     autoSteal: true,     // 自动偷邻居（每天10次）
+    minStealPrice: 60,   // 偷菜最低单价阈值：低于此单价不偷（60=跳过白萝卜/茄子/南瓜等低价值）
     // 节奏
     tickMs: 3000,        // 主循环间隔
     stealInterval: 60000,// 偷菜扫描间隔
@@ -201,7 +202,7 @@
     const badge = !S.ready ? '<span class="ff-badge">等待游戏</span>' : S.run ? '<span class="ff-badge run">运行中</span>' : '<span class="ff-badge">待机</span>';
     const best = pickBestCrop();
     p.innerHTML = `
-      <div class="ff-head"><div class="ff-title">🌾 FarmFarm<small>0.0.2</small></div>${badge}</div>
+      <div class="ff-head"><div class="ff-title">🌾 FarmFarm<small>0.0.1</small></div>${badge}</div>
       <div class="ff-body">
         <div class="ff-cardbox">
           <div class="ff-ct">E 收益看板</div>
@@ -337,6 +338,8 @@
       const targets = [];
       for (const nb of list) for (const p of (nb.plots || [])) {
         const c = CROP_BY_ID[p.crop_id];
+        // 跳过低价值作物：偷菜次数有限（10次/天），全用在高单价上
+        if (c && c.pr < CFG.minStealPrice) continue;
         targets.push({ uid: nb.user_id, idx: p.idx, cropId: p.crop_id, count: p.count || 1, value: c ? stealValue(c) : 0 });
       }
       targets.sort((a, b) => b.value - a.value);
