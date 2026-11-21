@@ -28,8 +28,9 @@
     autoWater: true,     // 自动浇水（每次 -1分钟生长）
     autoFert: true,      // 自动施肥（每次 -1分钟，每天20次）
     autoSteal: true,     // 自动偷邻居（每天10次）
-    minStealPrice: 60,   // 偷菜最低单价阈值（兜底）
-    stealTopOnly: true,  // 只偷最高一档作物（荔枝172/杨梅168/樱桃156），其余留次数等刷出更好的
+    stealOnlyId: 29,     // 只偷这个作物：29=荔枝(单价172，全场最高)；0=偷当前刷出的最高单价
+    minStealPrice: 60,   // 兜底阈值（stealOnlyId=0时使用）
+    stealTopOnly: true,  // 偷当前最高单价一档（stealOnlyId=0时使用）
     stealRefreshMs: 8000,// 没高价值作物时，多久重刷一次邻居列表
     // 节奏
     tickMs: 3000,        // 主循环间隔
@@ -345,11 +346,13 @@
         S.lastStealScan = Date.now();
         return;
       }
-      // 只偷最高一档：取最高单价，只偷与最高同档的（荔枝172/杨梅168/樱桃156 属同档附近）
+      // 偷菜选择：默认严格只偷荔枝(29)；没荔枝且 stealOnlyId=0 时才按最高单价偷
       let pool = targets;
-      if (CFG.stealTopOnly) {
+      if (CFG.stealOnlyId) {
+        pool = targets.filter(t => t.cropId === CFG.stealOnlyId);
+      } else if (CFG.stealTopOnly) {
         const top = targets[0].value;
-        pool = targets.filter(t => t.value >= top * 0.85); // 只偷收益≥最高档85%的
+        pool = targets.filter(t => t.value >= top);
       }
       let stole = 0;
       for (const t of pool) {
@@ -390,7 +393,7 @@
 
   // 偷菜独立循环：每 8 秒刷一次邻居，只偷最高价值作物，直到次数用完。
   async function stealLoop() {
-    log(`偷菜循环启动：只偷单价≥${CFG.minStealPrice}且收益≥最高档85%的作物`, "ok");
+    log(`偷菜循环启动：只偷${CFG.stealOnlyId ? (cropName(CFG.stealOnlyId) || "荔枝") : "最高单价"}作物`, "ok");
     let guard = 0;
     while (S.run && !S.abort) {
       guard++;
