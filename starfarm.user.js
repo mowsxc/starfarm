@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StarFarm V2 - Gacha Automation
 // @namespace    https://ultrarouter.org/gacha/
-// @version      2.0.0
+// @version      2.1.0
 // @description  All-in-one gacha assistant: dungeon farming, leveling, star-up, shard decomposition, gacha, gem socketing, shopping, squad optimizer. Server-authoritative settlement.
 // @author       StarFarm
 // @updateURL     https://raw.githubusercontent.com/mowsxc/starfarm/main/starfarm.user.js
@@ -28,6 +28,7 @@
     farmWhenNoToken: true,   // 今日代币池为0时仍继续刷
     gapMs: 500,              // 每场之间的间隔
     autoMulti: true,         // 自动维持双倍卡开启（E产出翻倍，核心！）
+    autoFlow: false,         // 自动流：副本→升级→升星→召唤→分解 闭环
     // 召唤
     gachaCount: 10,          // 每次召唤张数(1或10)
     gachaLimit: Infinity,    // 召唤次数上限
@@ -58,6 +59,7 @@
       gacha: { run: false, abort: false, n: 0 },
       gem:   { run: false, abort: false, n: 0 },
       shop:  { run: false, abort: false, n: 0 },
+      flow:  { run: false, abort: false, n: 0 },
     },
     // 统计
     done: 0, wins: 0, fails: 0, stars3: 0,
@@ -433,21 +435,24 @@
           <div class="sf-stat"><span>体力 <b class="sf-blue">${st.cur}/${st.max}</b></span><span>金币 <b class="sf-gold">${gold().toLocaleString()}</b></span><span>代币 <b>${tokens()}</b></span></div>
           <div class="sf-bar"><i style="width:${st.max ? Math.round(st.cur / st.max * 100) : 0}%"></i></div>
           <div class="sf-dots">
-            ${dot("farm", "副本")}${dot("level", "升级")}${dot("star", "升星")}${dot("decomp", "分解")}
-            ${dot("gacha", "召唤")}${dot("gem", "宝石")}${dot("shop", "商店")}
+            ${dot("flow", "自动流")}${dot("farm", "副本")}${dot("level", "升级")}${dot("star", "升星")}
+            ${dot("decomp", "分解")}${dot("gacha", "召唤")}${dot("gem", "宝石")}
           </div>
         </div>
 
         <div class="sf-card">
-          <div class="sf-ct">刷本赚E</div>
+          <div class="sf-ct">自动副本</div>
           <div class="sf-stat"><span>当前副本</span><b>${esc(stageName(latestStage()))}</b></div>
           <div class="sf-row"><label>场次</label><input id="sf-rounds" type="number" min="1" value="${CFG.rounds === Infinity ? "" : CFG.rounds}" placeholder="不限">
             <label style="min-width:auto">体力≥</label><input id="sf-minsta" type="number" min="1" value="${CFG.minStamina}" style="max-width:44px"></div>
           <div class="sf-grid">
-            ${btn("sf-farm", S.T.farm.run ? "停止副本" : "后台刷E", S.T.farm.run)}
+            ${btn("sf-farm", S.T.farm.run ? "停止副本" : "自动副本", S.T.farm.run)}
             ${btn("sf-fg", CFG.bgMode ? "后台:开" : "后台:关", CFG.bgMode)}
             ${btn("sf-multi", CFG.autoMulti ? "双倍:开" : "双倍:关", CFG.autoMulti)}
             ${btn("sf-token", CFG.farmWhenNoToken ? "池零续刷:开" : "池零续刷:关", CFG.farmWhenNoToken)}
+          </div>
+          <div class="sf-grid" style="margin-top:5px">
+            ${btn("sf-flow", S.T.flow.run ? "停止自动流" : "自动流", S.T.flow.run, true)}
           </div>
           <div class="sf-stat" style="margin-top:5px"><span>${S.done} 场 · 胜 <b class="sf-green">${S.wins}</b> 负 ${S.fails} · 3★ <b class="sf-gold">${S.stars3}</b></span><button id="sf-farm0" style="padding:2px 8px;font-size:10px">清空</button></div>
         </div>
@@ -500,6 +505,7 @@
     on("sf-opt", "onclick", () => optimizeSquad());
     on("sf-multi", "onclick", () => { CFG.autoMulti = !CFG.autoMulti; log(`自动双倍卡 ${CFG.autoMulti ? "开启：刷本前自动开双倍" : "关闭"}`); if (CFG.autoMulti) ensureMulti(); });
     on("sf-gacha", "onclick", () => toggleTask("gacha", gachaTask));
+    on("sf-flow", "onclick", () => toggleTask("flow", flowTask));
 
     if (fid) {
       const el = $(fid);
@@ -516,11 +522,78 @@
     else { t.run = true; t.abort = false; t.n = 0; render(); fn(); }
   }
   function taskName(k) {
-    return { farm: "副本", level: "升级", star: "升星", decomp: "分解", gacha: "召唤", gem: "镶嵌", shop: "商店" }[k] || k;
+    return { farm: "副本", level: "升级", star: "升星", decomp: "分解", gacha: "召唤", gem: "镶嵌", shop: "商店", flow: "自动流" }[k] || k;
   }
   function taskEnd(key, msg) {
     S.T[key].run = false; render();
     log(`${taskName(key)}结束：${msg}`, "warn");
+  }
+
+  /* ============================================================
+   * 单步操作（供"自动流"复用，跑一轮就返回，不自己起循环）
+   * ============================================================ */
+  // 升级一轮：把队伍里未满级的各升1级（满足条件才升），返回升级次数
+  async function levelPass() {
+    if (typeof SAVE === "undefined" || !SAVE || !SAVE.girls) return 0;
+    const MAX = (typeof GROWTH !== "undefined" && GROWTH.maxLevel) || 60;
+    const squad = (SAVE.squad || []).slice().sort((a, b) => (SAVE.girls[a]?.level || 0) - (SAVE.girls[b]?.level || 0));
+    let did = 0;
+    for (const id of squad) {
+      const o = SAVE.girls[id];
+      if (!o || o.star <= 0 || (o.level || 1) >= MAX) continue;
+      const lv = o.level || 1, cost = 20 + lv * 15;
+      if (gold() - cost < CFG.levelReserve) continue;
+      const r = await safeMutate("level", { girl_id: id });
+      if (r) { did++; S.levelUps++; S.T.level.n++; log(`升级 ${GIRLS.find((g) => g.id === id)?.name || id} Lv${lv}→${SAVE.girls[id].level}`, "ok"); }
+      await sleep(120);
+    }
+    return did;
+  }
+  // 升星扫描：所有满足碎片+材料的人各升1星，返回升星次数
+  async function starPass() {
+    let did = 0;
+    const owned = Object.keys(SAVE.girls || {}).filter((id) => SAVE.girls[id].star > 0);
+    owned.sort((a, b) => (SAVE.squad.includes(b) ? 1 : 0) - (SAVE.squad.includes(a) ? 1 : 0) || SAVE.girls[b].star - SAVE.girls[a].star);
+    for (const id of owned) { if (await tryStarUp(id, false)) did++; await sleep(120); }
+    return did;
+  }
+  // 召唤一次（count 张），成功返回结果，否则 null
+  async function gachaOne() {
+    const count = CFG.gachaCount;
+    const cost = count === 10 ? 1400 : 150;
+    if (gold() - cost < CFG.gachaReserve) return null;
+    const res = await safeMutate("gacha", { count });
+    if (!res) return null;
+    S.gachaPulls++; S.T.gacha.n++;
+    let ssr = 0, sr = 0, nw = 0; const names = [];
+    for (const r of (res.results || [])) {
+      const g = GIRLS.find((x) => x.id === r.girl_id);
+      if (!g) continue;
+      if (g.rarity === "SSR") ssr++; else if (g.rarity === "SR") sr++;
+      if (r.is_new) nw++;
+      names.push(`${g.name}${r.is_new ? "✨" : ""}${g.rarity === "SSR" ? "★" : ""}`);
+    }
+    S.gachaSSR += ssr; S.gachaSR += sr; S.gachaNew += nw;
+    log(`第${S.gachaPulls}抽：${names.join("、")}${ssr ? "【出金】" : ""}`, ssr ? "ok" : "");
+    return res;
+  }
+  // 分解一轮：所有角色的多余碎片，返回分解人数
+  async function decompPass() {
+    let cnt = 0, dust = 0;
+    for (const g of GIRLS) {
+      const o = SAVE.girls[g.id];
+      const extra = Math.max(0, (o?.shards || 0) - reserveOf(g, o));
+      if (extra < 1) continue;
+      const res = await safeMutate("shard_decompose", { girl_id: g.id, count: extra });
+      if (res && res.decomposition) {
+        cnt++; dust += res.decomposition.dust || 0;
+        log(`分解 ${g.name} ×${res.decomposition.shards} → 尘 +${res.decomposition.dust}`, "ok");
+      }
+      await sleep(120);
+    }
+    S.decompDust += dust; S.T.decomp.n += cnt;
+    if (cnt) log(`分解 ${cnt} 人，尘 +${dust}`, "ok");
+    return cnt;
   }
 
   /* ============================================================
@@ -580,6 +653,58 @@
       return true;
     }
     catch (e) { log(`开战异常：${e.message}`, "bad"); return false; }
+  }
+
+  /* ============================================================
+   * 自动流：副本→升级→升星→召唤→分解 闭环
+   * 攒E优先：刷副本产E→金币先升级/升星(变强→刷更快)→有余钱召唤→召唤产碎片→分解→升星
+   * 后台模式只影响副本是否显示画面，不影响自动流逻辑。
+   * ============================================================ */
+  async function flowTask() {
+    hookFinishRun();
+    log(`自动流启动：副本→升级→升星→召唤→分解（${CFG.bgMode ? "后台" : "前台"}副本）`, "ok");
+    let cycle = 0;
+    while (S.T.flow.run && !S.T.flow.abort) {
+      cycle++; S.T.flow.n = cycle;
+      S.T.farm.run = true; render();
+      // 1) 刷一场副本（产 E + 金币）
+      const st = stamina();
+      if (st.cur < CFG.minStamina) { log(`体力 ${st.cur}/${st.max} 不足，自动流暂停`, "warn"); break; }
+      if (CFG.autoMulti) await ensureMulti();
+      const ok = CFG.bgMode ? await fastRun() : await animRun();
+      S.T.farm.run = false;
+      if (!ok) { log("自动流：本场副本失败，2秒后重试", "warn"); await sleep(2000); continue; }
+      S.done++; S.T.farm.n = S.done;
+      await sleep(CFG.gapMs);
+
+      // 2) 金币优先升级队伍（变强→刷本更快→E更多）
+      S.T.level.run = true; render();
+      let ups = await levelPass();
+      S.T.level.run = false;
+      if (ups) log(`自动流：升级 ${ups} 次`, "ok");
+
+      // 3) 升星（碎片+材料够就升）
+      S.T.star.run = true; render();
+      let sups = await starPass();
+      S.T.star.run = false;
+      if (sups) log(`自动流：升星 ${sups} 次`, "ok");
+
+      // 4) 有余钱召唤（保留 upgrade 的金币下限后，够一次就抽一次）
+      S.T.gacha.run = true; render();
+      const pulled = await gachaOne();
+      S.T.gacha.run = false;
+
+      // 5) 召唤完自动分解多余碎片
+      if (pulled) {
+        S.T.decomp.run = true; render();
+        await decompPass();
+        S.T.decomp.run = false;
+      }
+      render();
+      await sleep(300);
+    }
+    S.T.farm.run = S.T.level.run = S.T.star.run = S.T.gacha.run = S.T.decomp.run = false;
+    taskEnd("flow", `完成 ${cycle - 1} 轮`);
   }
 
   /* ============================================================
@@ -820,7 +945,7 @@
    * 公共 API
    * ============================================================ */
   window.starfarm = {
-    start: (key) => { const fn = { farm: farmTask, level: levelTask, star: starTask, decomp: decompTask, gacha: gachaTask, gem: gemTask }[key || "farm"]; if (fn) toggleTask(key || "farm", fn); return "started"; },
+    start: (key) => { const fn = { farm: farmTask, level: levelTask, star: starTask, decomp: decompTask, gacha: gachaTask, gem: gemTask, flow: flowTask }[key || "farm"]; if (fn) toggleTask(key || "farm", fn); return "started"; },
     stop: (key) => { if (key && S.T[key]) { S.T[key].abort = true; S.T[key].run = false; } else Object.values(S.T).forEach((t) => { t.abort = true; t.run = false; }); render(); return "stopped"; },
     set: (cfg) => { Object.assign(CFG, cfg); render(); return { ...CFG }; },
     status: () => ({
