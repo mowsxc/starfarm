@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FarmFarm - Ultra Router Farm Automation
 // @namespace    https://ultrarouter.org/farm/
-// @version      0.0.5
+// @version      0.0.6
 // @description  Auto farm for ultrarouter.org/farm: harvest, plant best crop, water/fertilize, steal from neighbors. Server-authoritative.
 // @author       FarmFarm
 // @match        https://ultrarouter.org/farm
@@ -48,6 +48,7 @@
     results: [], logs: [], errors: [], last: "",
     lastStealAt: 0, lastSyncAt: 0,
     lastStealScan: 0,
+    gen: 0,   // 循环代次：stop/start 时递增，防止旧循环残留并行
     cropName: {},
   };
   window.__FF = S;
@@ -105,7 +106,27 @@
   async function api(path, body) {
     const w = gw();
     if (!w || typeof w.api !== "function") throw new Error("游戏未就绪");
-    return await w.api(path, body);
+    const d = await w.api(path, body);
+    // 关键：游戏的 act() 会调 applyState(data.state) 更新 game；
+    // 我们直接调 api() 绕过了它。这里手动把状态写回 window.__farm，
+    // 否则 syncState() 永远读到旧数据（导致空收/空种/重复操作）。
+    if (d && d.state && w.__farm) {
+      try { w.applyState(d.state); } catch (e) {
+        // applyState 不可访问时，手动合并关键字段
+        const s = d.state;
+        Object.assign(w.__farm, {
+          level: s.level || w.__farm.level, exp: s.exp || w.__farm.exp,
+          expNext: s.exp_next || w.__farm.expNext, quota: s.quota || w.__farm.quota,
+          daily: s.daily || w.__farm.daily, records: s.records || w.__farm.records,
+          plots: (s.plots || []).map(p => ({
+            idx: p.idx, cropId: p.crop_id || 0, cropName: p.crop_name || "",
+            season: p.season || 0, seasons: p.seasons || 1, withered: !!p.withered,
+            watered: !!p.watered, growth: p.growth || 0, total: p.total || 0, ready: !!p.ready,
+          })),
+        });
+      }
+    }
+    return d;
   }
   function syncState() {
     const w = gw();
@@ -134,7 +155,9 @@
       const def = w && w.CROP_BY_ID && w.CROP_BY_ID[id];
       if (def && def.name) return def.name;
     } catch (e) {}
-    return "#" + id;
+    // 游戏内 CROP_BY_ID 是顶层 const，油猴主世界可能读不到；用本地表兜底
+    const NAMES = { 1:"白萝卜",7:"大白菜",24:"小麦",2:"玉米",21:"土豆",23:"茄子",19:"番茄",18:"红玫瑰",25:"豌豆",28:"辣椒",16:"南瓜",3:"草莓",5:"苹果",6:"香蕉",22:"桃子",4:"非洲菊",27:"石榴",8:"蘑菇",26:"柚子",9:"椰子",20:"樱桃",29:"荔枝",17:"杨梅" };
+    return NAMES[id] || ("#" + id);
   }
 
   function buildFeed() {
@@ -206,7 +229,7 @@
     const badge = !S.ready ? '<span class="ff-badge">等待游戏</span>' : S.run ? '<span class="ff-badge run">运行中</span>' : '<span class="ff-badge">待机</span>';
     const best = pickBestCrop();
     p.innerHTML = `
-      <div class="ff-head"><div class="ff-title">🌾 FarmFarm<small>0.0.5</small></div>${badge}</div>
+      <div class="ff-head"><div class="ff-title">🌾 FarmFarm<small>0.0.6</small></div>${badge}</div>
       <div class="ff-body">
         <div class="ff-cardbox">
           <div class="ff-ct">E 收益看板</div>
@@ -322,7 +345,7 @@
     }
     if (CFG.autoFert && (S.daily.fert_left || 0) > 0 && growing.length) {
       const d = await doAct("/fert-all", {}, "施肥");
-      if (d) log(`一键施肥 · 剩余 ${(S.daily.fert_left || 0) - 1} 次`, "ok");
+      if (d) log(`一键施肥 · 剩余 ${S.daily.fert_left || 0} 次`, "ok");
     }
     syncState();
     render();
@@ -375,8 +398,9 @@
   }
 
   async function loop() {
+    const gen = S.gen;
     log("自动农场启动 · 目标作物 " + (CFG.cropId ? cropName(CFG.cropId) : "自动最优"), "ok");
-    while (S.run && !S.abort) {
+    while (S.run && !S.abort && S.gen === gen) {
       S.cycle++;
       const before = S.daily.harvest_quota || 0;
       try { await oneCycle(); } catch (e) { log("循环异常：" + e.message, "bad"); }
@@ -387,16 +411,16 @@
     S.run = false; render(); log("自动农场已停止", "warn");
   }
   function toggle() {
+    S.gen++;  // 每次切换都让旧循环失效
     if (S.run) { S.abort = true; S.run = false; log("停止中", "warn"); render(); }
     else { S.run = true; S.abort = false; render(); loop(); stealLoop(); }
   }
 
   // 偷菜独立循环：每 8 秒刷一次邻居，只偷最高价值作物，直到次数用完。
   async function stealLoop() {
+    const gen = S.gen;
     log(`偷菜循环启动：只偷${CFG.stealOnlyId ? (cropName(CFG.stealOnlyId) || "荔枝") : "最高单价"}作物`, "ok");
-    let guard = 0;
-    while (S.run && !S.abort) {
-      guard++;
+    while (S.run && !S.abort && S.gen === gen) {
       if (CFG.autoSteal && (S.daily.steal_left || 0) > 0 && ready()) {
         try {
           syncState();
