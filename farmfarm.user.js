@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FarmFarm - Ultra Router Farm Automation
 // @namespace    https://ultrarouter.org/farm/
-// @version      0.0.1
+// @version      0.0.2
 // @description  Auto farm for ultrarouter.org/farm: harvest, plant best crop, water/fertilize, steal from neighbors. Server-authoritative.
 // @author       FarmFarm
 // @match        https://ultrarouter.org/farm
@@ -201,7 +201,7 @@
     const badge = !S.ready ? '<span class="ff-badge">等待游戏</span>' : S.run ? '<span class="ff-badge run">运行中</span>' : '<span class="ff-badge">待机</span>';
     const best = pickBestCrop();
     p.innerHTML = `
-      <div class="ff-head"><div class="ff-title">🌾 FarmFarm<small>0.0.1</small></div>${badge}</div>
+      <div class="ff-head"><div class="ff-title">🌾 FarmFarm<small>0.0.2</small></div>${badge}</div>
       <div class="ff-body">
         <div class="ff-cardbox">
           <div class="ff-ct">E 收益看板</div>
@@ -257,7 +257,9 @@
   async function doAct(path, body, label) {
     try {
       const d = await api(path, body);
-      if (d && d.state) { /* state applied in game; we resync */ }
+      // act() 只更新游戏内部 game 状态，我们的 S.plots 是快照；
+      // 每次操作后立即重同步，避免用旧快照判断（空收/空种/重复施肥）。
+      syncState();
       return d;
     } catch (e) { S.errors.push(label + ":" + e.message); log(label + "失败：" + e.message, "bad"); return null; }
   }
@@ -267,14 +269,18 @@
     syncState();
     // 1) 收获成熟
     if (CFG.autoHarvest) {
+      const beforeQuota = S.daily.harvest_quota || 0;
       const mature = S.plots.filter(p => p.ready && !p.withered);
       if (mature.length) {
         const d = await doAct("/harvest-all", {}, "收取");
         if (d) {
-          const e = (d.reward_quota || 0) / 500000;
+          const gained = Math.max(0, (S.daily.harvest_quota || 0) - beforeQuota);
+          const e = gained / 500000 || (d.reward_quota || 0) / 500000;
           S.harvestE += e; S.harvestCount += mature.length;
-          pushResult("harvest", e, "一键收取", mature.length, d.message || "");
-          log(`收取 ${mature.length} 块地 · +${e.toFixed(2)} E`, "ok");
+          if (gained > 0) {
+            pushResult("harvest", e, "一键收取", mature.length, d.message || "");
+            log(`收取 ${mature.length} 块地 · +${e.toFixed(2)} E`, "ok");
+          }
         }
       }
     }
@@ -290,6 +296,9 @@
     if (CFG.autoPlant && empty.length) {
       let planted = 0;
       for (const p of empty) {
+        // 用最新快照复查，跳过已经种上的地
+        const cur = S.plots.find(x => x.idx === p.idx);
+        if (cur && cur.cropId && !cur.withered) continue;
         const d = await doAct("/plant", { idx: p.idx, crop_id: cropId }, "播种");
         if (d) planted++;
         await sleep(120);
@@ -337,7 +346,10 @@
         if ((S.daily.steal_left || 0) <= 0) break;
         const r = await doAct("/steal", { user_id: t.uid, idx: t.idx }, "偷菜");
         if (r) {
-          const e = (r.reward_quota || 0) / 500000;
+          // 服务端把偷取收益放在 message 里（"+E0.040320 额度"），字段 reward_quota 可能为空
+          let e = (r.reward_quota || 0) / 500000;
+          const m = String(r.message || "").match(/\+E?([\d.]+)\s*额度/i) || String(r.message || "").match(/\+([\d.]+)\s*E/i);
+          if (m && !e) e = parseFloat(m[1]) || 0;
           S.stealE += e; S.stealCount++;
           pushResult("steal", e, cropName(t.cropId), t.count, r.message || "");
           log(`偷 ${cropName(t.cropId)} ×${t.count} · +${e.toFixed(3)} E（剩 ${S.daily.steal_left || 0}次）`, "ok");
@@ -351,8 +363,12 @@
     log("自动农场启动 · 目标作物 " + (CFG.cropId ? cropName(CFG.cropId) : "自动最优"), "ok");
     while (S.run && !S.abort) {
       S.cycle++;
+      const before = S.daily.harvest_quota || 0;
       try { await oneCycle(); } catch (e) { log("循环异常：" + e.message, "bad"); }
-      await sleep(CFG.tickMs);
+      // 智能节奏：有收获/偷取/播种发生就快速跟进；否则拉长间隔，避免空转刷日志。
+      const active = (S.daily.harvest_quota || 0) > before || S.stealCount > 0 && Date.now() - S.lastStealAt < 5000;
+      const waiting = S.plots.some(p => p.cropId && !p.ready && !p.withered);
+      await sleep(waiting ? 30000 : CFG.tickMs);
     }
     S.run = false; render(); log("自动农场已停止", "warn");
   }
